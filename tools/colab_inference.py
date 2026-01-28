@@ -30,6 +30,12 @@ from tools.tracker_interface import (
     TrackerOutput,
     McByteTrackerAdapter,
 )
+from tools.demo_track import filter_detections_by_class
+from yolox.tracker.class_config import (
+    TRACK_CLASSES as DEFAULT_TRACK_CLASSES,
+    SPECIAL_CLASSES as DEFAULT_SPECIAL_CLASSES,
+    CLASS_NAMES as DEFAULT_CLASS_NAMES,
+)
 
 
 def run_inference(
@@ -45,6 +51,10 @@ def run_inference(
     sam_type: str = "vit_b",
     cutie_weights: Optional[str] = None,
     enable_masks: bool = True,
+    # Class filtering options
+    track_classes: Optional[List[int]] = None,
+    special_classes: Optional[List[int]] = None,
+    no_class_filter: bool = False,
     # Other options
     device: str = "auto",
     class_names: Optional[List[str]] = None,
@@ -76,6 +86,12 @@ def run_inference(
         cutie_weights: Path to Cutie weights. If None, uses default.
         enable_masks: Whether to enable mask propagation
 
+        # Class filtering options
+        track_classes: List of class IDs to track. If None, uses defaults from class_config.
+        special_classes: List of class IDs where only max-confidence detection is kept
+                        (useful for small objects like puck). If None, uses defaults.
+        no_class_filter: If True, disables class filtering (track all detected classes)
+
         # Other options
         device: Device to use ('cuda', 'cpu', 'auto')
         class_names: Optional list of class names for your model
@@ -98,6 +114,19 @@ def run_inference(
         print(f"[McByte] Using device: {device}")
         print(f"[McByte] Tracker: {tracker_type}")
         print(f"[McByte] Masks enabled: {enable_masks}")
+
+    # Determine class filtering settings
+    if no_class_filter:
+        _track_classes = None
+        _special_classes = None
+        if verbose:
+            print("[McByte] Class filtering: DISABLED (tracking all classes)")
+    else:
+        _track_classes = track_classes if track_classes is not None else DEFAULT_TRACK_CLASSES
+        _special_classes = special_classes if special_classes is not None else DEFAULT_SPECIAL_CLASSES
+        if verbose:
+            print(f"[McByte] Track classes: {_track_classes}")
+            print(f"[McByte] Special classes (max-conf only): {_special_classes}")
 
     # Create output directory
     timestamp = time.strftime("%Y_%m_%d_%H_%M_%S")
@@ -213,6 +242,14 @@ def run_inference(
                 # Run detection
                 outputs, img_info = predictor.inference(frame)
 
+                # Apply class filtering and special class handling
+                if outputs[0] is not None and len(outputs[0]) > 0:
+                    outputs = (filter_detections_by_class(
+                        outputs[0],
+                        track_classes=_track_classes,
+                        special_classes=_special_classes
+                    ),)
+
                 if outputs[0] is not None and len(outputs[0]) > 0:
                     # Update masks (if enabled and not first frame)
                     if enable_masks and mask_manager is not None and frame_id > 1:
@@ -264,10 +301,11 @@ def run_inference(
                         online_ids.append(tid)
                         online_scores.append(t.score)
 
-                        # Save results in MOT format
+                        # Save results in MOT format with class_id in last column
+                        cls_id = t.class_id if hasattr(t, 'class_id') and t.class_id is not None else -1
                         results.append(
                             f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},"
-                            f"{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
+                            f"{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,{cls_id}\n"
                         )
 
                     # Visualization
@@ -571,6 +609,26 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="auto")
     parser.add_argument("--vis-type", default="basic", choices=["basic", "no_vis"])
     parser.add_argument("--validate", action="store_true", help="Run validation only")
+    # Class filtering arguments
+    parser.add_argument(
+        "--track-classes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Class IDs to track (e.g., --track-classes 3 4 5 6)"
+    )
+    parser.add_argument(
+        "--special-classes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Classes where only max-confidence detection is kept (e.g., --special-classes 5)"
+    )
+    parser.add_argument(
+        "--no-class-filter",
+        action="store_true",
+        help="Disable class filtering (track all detected classes)"
+    )
 
     args = parser.parse_args()
 
@@ -594,6 +652,9 @@ if __name__ == "__main__":
             sam_type=args.sam_type,
             cutie_weights=args.cutie_weights,
             enable_masks=not args.no_masks,
+            track_classes=args.track_classes,
+            special_classes=args.special_classes,
+            no_class_filter=args.no_class_filter,
             device=args.device,
             vis_type=args.vis_type,
         )

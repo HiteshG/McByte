@@ -23,7 +23,7 @@ MAX_COST_UNCONFIRMED_ASSOC_STEP = 0.7
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score):
+    def __init__(self, tlwh, score, class_id=None):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=np.float64)
@@ -32,6 +32,7 @@ class STrack(BaseTrack):
         self.is_activated = False
 
         self.score = score
+        self.class_id = class_id  # Class ID for multi-class tracking
         self.tracklet_len = 0
 
         # NOt sure if this one here is actually required. Well, maybe in case I want to output and/or visualize freshly initialized tracklets in the future...
@@ -104,6 +105,8 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
+        if new_track.class_id is not None:
+            self.class_id = new_track.class_id
 
         self.last_det_tlwh = new_track.tlwh ## Extra added
 
@@ -127,6 +130,8 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
+        if new_track.class_id is not None:
+            self.class_id = new_track.class_id
 
         self.last_det_tlwh = new_track.tlwh ## Extra added
 
@@ -400,12 +405,20 @@ class McByteTracker(object):
         if output_results.shape[1] == 5:
             scores = output_results[:, 4]
             bboxes = output_results[:, :4]
-        else:
-            output_results = output_results.cpu().numpy()
+            class_ids = None
+        elif output_results.shape[1] == 6:
+            output_results = output_results.cpu().numpy() if hasattr(output_results, 'cpu') else output_results
             scores = output_results[:, 4] * output_results[:, 5]
             bboxes = output_results[:, :4]  # x1y1x2y2
+            class_ids = None
+        else:
+            # Shape [N, 7+]: includes class_id
+            output_results = output_results.cpu().numpy() if hasattr(output_results, 'cpu') else output_results
+            scores = output_results[:, 4] * output_results[:, 5]
+            bboxes = output_results[:, :4]  # x1y1x2y2
+            class_ids = output_results[:, 6].astype(int) if output_results.shape[1] >= 7 else None
         img_h, img_w = img_info[0], img_info[1]
-        
+
         if not dets_from_file:
             scale = min(img_size[0] / float(img_h), img_size[1] / float(img_w))
             bboxes /= scale
@@ -419,6 +432,8 @@ class McByteTracker(object):
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
+        class_ids_keep = class_ids[remain_inds] if class_ids is not None else None
+        class_ids_second = class_ids[inds_second] if class_ids is not None else None
 
         self.logger.log_frame_no(self.frame_id)
         self.logger.log_state_tracklets_ids(self.tracked_stracks, self.lost_stracks, self.removed_stracks)
@@ -426,8 +441,12 @@ class McByteTracker(object):
 
         if len(dets) > 0:
             '''Detections'''
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets, scores_keep)]
+            if class_ids_keep is not None:
+                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s, cls_id) for
+                              (tlbr, s, cls_id) in zip(dets, scores_keep, class_ids_keep)]
+            else:
+                detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
+                              (tlbr, s) in zip(dets, scores_keep)]
         else:
             detections = []
 
@@ -497,8 +516,12 @@ class McByteTracker(object):
         # association of the untrack to the low score detections
         if len(dets_second) > 0:
             '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets_second, scores_second)]
+            if class_ids_second is not None:
+                detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s, cls_id) for
+                              (tlbr, s, cls_id) in zip(dets_second, scores_second, class_ids_second)]
+            else:
+                detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
+                              (tlbr, s) in zip(dets_second, scores_second)]
             # detections_second = [] # quick change for excluding the whole second association step
         else:
             detections_second = []

@@ -5,6 +5,7 @@ import sys
 import time
 import cv2
 import torch
+import numpy as np
 
 from loguru import logger
 
@@ -13,6 +14,9 @@ from yolox.exp import get_exp
 from yolox.utils import fuse_model, get_model_info, postprocess
 from yolox.utils.visualize import plot_tracking, plot_tracking_basic
 from yolox.tracker.mcbyte_tracker import McByteTracker
+from yolox.tracker.class_config import (
+    TRACK_CLASSES, SPECIAL_CLASSES, CLASS_NAMES, CLASS_COLORS, NUM_CLASSES
+)
 
 from mask_propagation.mask_manager import MaskManager
 
@@ -24,6 +28,70 @@ GRID_STEP = 10
 MASK_CREATION_BB_OVERLAP_THRESHOLD = 0.6
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
+
+
+def filter_detections_by_class(outputs, track_classes=None, special_classes=None):
+    """
+    Filter detections by class and apply special class handling.
+
+    Args:
+        outputs: Detection tensor with shape [N, 7] where columns are:
+                 [x1, y1, x2, y2, obj_score, class_score, class_id]
+        track_classes: List of class IDs to track. If None, track all classes.
+        special_classes: List of class IDs where only max-confidence detection is kept.
+                        Useful for small objects like puck.
+
+    Returns:
+        Filtered outputs tensor with same format
+    """
+    if outputs is None or len(outputs) == 0:
+        return outputs
+
+    # Convert to numpy if tensor
+    if torch.is_tensor(outputs):
+        outputs_np = outputs.cpu().numpy()
+    else:
+        outputs_np = outputs.copy()
+
+    # Extract class IDs (column 6)
+    if outputs_np.shape[1] >= 7:
+        class_ids = outputs_np[:, 6].astype(int)
+    else:
+        # No class info available, return as-is
+        return outputs
+
+    # Filter by track_classes
+    if track_classes is not None:
+        mask = np.isin(class_ids, track_classes)
+        outputs_np = outputs_np[mask]
+        if len(outputs_np) == 0:
+            return outputs_np
+        class_ids = outputs_np[:, 6].astype(int)
+
+    # Handle special classes (keep only max confidence detection)
+    if special_classes is not None and len(special_classes) > 0:
+        keep_indices = []
+
+        for i, (det, cls_id) in enumerate(zip(outputs_np, class_ids)):
+            if cls_id in special_classes:
+                # Check if this is the max confidence for this special class
+                same_class_mask = class_ids == cls_id
+                same_class_scores = outputs_np[same_class_mask, 4] * outputs_np[same_class_mask, 5]
+                current_score = det[4] * det[5]
+                if current_score >= same_class_scores.max():
+                    keep_indices.append(i)
+            else:
+                # Regular class, keep all
+                keep_indices.append(i)
+
+        # Remove duplicates while preserving order
+        keep_indices = list(dict.fromkeys(keep_indices))
+        outputs_np = outputs_np[keep_indices]
+
+    # Convert back to tensor if original was tensor
+    if torch.is_tensor(outputs):
+        return torch.from_numpy(outputs_np).to(outputs.device)
+    return outputs_np
 
 
 def make_parser():
@@ -92,6 +160,27 @@ def make_parser():
 
     parser.add_argument("--start_frame_no", type=int, default=1, help="starting frame file number (counting from 1)")
     parser.add_argument("--vis_type", default="basic", type=str, help="visualization type, with OR without detections and tracklets before Kalman filter update OR no visualization: full | basic | no_vis")
+
+    # Class filtering arguments
+    parser.add_argument(
+        "--track_classes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="List of class IDs to track (e.g., --track_classes 3 4 5 6). If not specified, uses defaults from class_config.py"
+    )
+    parser.add_argument(
+        "--special_classes",
+        type=int,
+        nargs="+",
+        default=None,
+        help="List of class IDs where only max-confidence detection is kept (e.g., --special_classes 5 for puck). If not specified, uses defaults from class_config.py"
+    )
+    parser.add_argument(
+        "--no_class_filter",
+        action="store_true",
+        help="Disable class filtering (track all detected classes)"
+    )
 
     return parser
 
@@ -215,6 +304,14 @@ def image_demo(det_source, vis_folder, current_time, args):
     os.makedirs(save_folder, exist_ok=True)
     ### / ###
 
+    # Determine class filtering settings
+    if args.no_class_filter:
+        track_classes = None
+        special_classes = None
+    else:
+        track_classes = args.track_classes if args.track_classes is not None else TRACK_CLASSES
+        special_classes = args.special_classes if args.special_classes is not None else SPECIAL_CLASSES
+
     vis_type = args.vis_type
     if vis_type not in ['full', 'basic', 'no_vis']:
         print("[vis_type unrecognized, no visualization assumed]")
@@ -249,12 +346,20 @@ def image_demo(det_source, vis_folder, current_time, args):
                     outputs, img_info = get_detections(img_path, frame_id + args.start_frame_no-1, det_list)
                 else:
                     outputs, img_info = predictor.inference(img_path)
-                
-                if outputs[0] is not None:
+
+                # Apply class filtering and special class handling
+                if outputs[0] is not None and not dets_from_file:
+                    outputs = (filter_detections_by_class(
+                        outputs[0],
+                        track_classes=track_classes,
+                        special_classes=special_classes
+                    ),)
+
+                if outputs[0] is not None and len(outputs[0]) > 0:
 
                     if frame_id > 1:
                         prediction, tracklet_mask_dict, mask_avg_prob_dict, prediction_colors_preserved = mask_menager.get_updated_masks(img_info, img_info_prev, frame_id, online_tlwhs, online_ids, new_tracks, removed_tracks_ids)
-                    
+
                     online_targets, removed_tracks_ids, new_tracks, detections_per_assoc_step, all_considered_tracklets_before_correction = tracker.update(outputs[0], [img_info['height'], img_info['width']], exp.test_size, prediction_mask=prediction, tracklet_mask_dict=tracklet_mask_dict, mask_avg_prob_dict=mask_avg_prob_dict, frame_img=img_info['raw_img'], vis_type=vis_type, dets_from_file=dets_from_file)
                     online_tlwhs = []
                     online_ids = []
@@ -265,9 +370,10 @@ def image_demo(det_source, vis_folder, current_time, args):
                         online_tlwhs.append(tlwh)
                         online_ids.append(tid)
                         online_scores.append(t.score)
-                        # save results
+                        # save results (MOT format with class_id in last column)
+                        cls_id = t.class_id if t.class_id is not None else -1
                         results.append(
-                            f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
+                            f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,{cls_id}\n"
                         )
 
                     if vis_type == 'full':
@@ -319,6 +425,14 @@ def video_demo(det_source, vis_folder, current_time, args):
     save_folder = osp.join(vis_folder, timestamp)
     os.makedirs(save_folder, exist_ok=True)
     ### / ###
+
+    # Determine class filtering settings
+    if args.no_class_filter:
+        track_classes = None
+        special_classes = None
+    else:
+        track_classes = args.track_classes if args.track_classes is not None else TRACK_CLASSES
+        special_classes = args.special_classes if args.special_classes is not None else SPECIAL_CLASSES
 
     cap = cv2.VideoCapture(args.path)
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
@@ -376,8 +490,16 @@ def video_demo(det_source, vis_folder, current_time, args):
                     outputs, img_info = get_detections(frame, frame_id, det_list)
                 else:
                     outputs, img_info = predictor.inference(frame)
-                
-                if outputs[0] is not None:
+
+                # Apply class filtering and special class handling
+                if outputs[0] is not None and not dets_from_file:
+                    outputs = (filter_detections_by_class(
+                        outputs[0],
+                        track_classes=track_classes,
+                        special_classes=special_classes
+                    ),)
+
+                if outputs[0] is not None and len(outputs[0]) > 0:
 
                     if frame_id - args.start_frame_no + 1 > 1:
                         prediction, tracklet_mask_dict, mask_avg_prob_dict, prediction_colors_preserved = mask_menager.get_updated_masks(img_info, img_info_prev, frame_id - args.start_frame_no + 1, online_tlwhs, online_ids, new_tracks, removed_tracks_ids)
@@ -392,9 +514,10 @@ def video_demo(det_source, vis_folder, current_time, args):
                         online_tlwhs.append(tlwh)
                         online_ids.append(tid)
                         online_scores.append(t.score)
-                        # save results
+                        # save results (MOT format with class_id in last column)
+                        cls_id = t.class_id if t.class_id is not None else -1
                         results.append(
-                            f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,-1\n"
+                            f"{frame_id},{tid},{tlwh[0]:.2f},{tlwh[1]:.2f},{tlwh[2]:.2f},{tlwh[3]:.2f},{t.score:.2f},-1,-1,{cls_id}\n"
                         )
 
                     if vis_type == 'basic':

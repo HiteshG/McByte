@@ -1,7 +1,8 @@
 """
 YOLOv8 Predictor wrapper for McByte tracking pipeline.
 
-Adapts YOLOv8 output to tracker-compatible format [x1, y1, x2, y2, score].
+Adapts YOLOv8 output to tracker-compatible format:
+[x1, y1, x2, y2, obj_score, class_score, class_id]
 """
 
 import cv2
@@ -81,7 +82,8 @@ class YOLOv8Predictor:
             img: Image as numpy array (BGR) or path to image file
 
         Returns:
-            outputs: List containing detection tensor [N, 5] with [x1, y1, x2, y2, score]
+            outputs: List containing detection tensor [N, 7] with
+                    [x1, y1, x2, y2, obj_score, class_score, class_id]
                     or [None] if no detections
             img_info: Dict with keys:
                 - 'id': frame id (always 0)
@@ -127,10 +129,16 @@ class YOLOv8Predictor:
             # Get confidence scores
             conf = boxes.conf.cpu().numpy()  # [N]
 
-            # Combine into [N, 5] array: [x1, y1, x2, y2, score]
-            detections = np.zeros((len(xyxy), 5), dtype=np.float32)
+            # Get class IDs
+            cls = boxes.cls.cpu().numpy()  # [N]
+
+            # Combine into [N, 7] array: [x1, y1, x2, y2, obj_score, class_score, class_id]
+            # YOLOv8 provides a single confidence (obj * class), so we use it for both
+            detections = np.zeros((len(xyxy), 7), dtype=np.float32)
             detections[:, :4] = xyxy
-            detections[:, 4] = conf
+            detections[:, 4] = conf  # obj_score (YOLOv8 combines obj and class conf)
+            detections[:, 5] = 1.0   # class_score (set to 1.0 since conf already combined)
+            detections[:, 6] = cls   # class_id
 
             # Return as list (for compatibility with existing pipeline)
             outputs = [detections]
