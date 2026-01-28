@@ -1,9 +1,8 @@
 import torch
 import sys
 from pathlib import Path
+from typing import Optional
 
-### SAM ###
-from segment_anything import sam_model_registry, SamPredictor
 import numpy as np
 
 # Enable imports from the Cutie directory
@@ -17,6 +16,7 @@ cutie_config_rel = "Cutie/cutie/config"
 ### Cutie ###
 from omegaconf import open_dict
 from hydra import compose, initialize
+from hydra.core.global_hydra import GlobalHydra
 
 from cutie.model.cutie import CUTIE
 from cutie.inference.inference_core import InferenceCore
@@ -27,14 +27,31 @@ OVERLAP_MEASURE_VARIANT = 1
 OVERLAP_VARIANT_2_GRID_STEP = 10
 MASK_CREATION_BBOX_OVERLAP_THRESHOLD = 0.6
 
+# Supported SAM model types
+SAM_MODEL_TYPES = ["vit_b", "vit_l", "vit_h", "sam2"]
+
 
 class MaskManager(object):
-    def __init__(self):
-        self.masks = None # masks instances from image segmentation component (SAM)
-        self.mask = None # mask isntances related to mask temporal propagator (Cutie)
+    def __init__(
+        self,
+        sam_checkpoint: Optional[str] = None,
+        sam_type: str = "vit_b",
+        cutie_weights: Optional[str] = None,
+        device: Optional[str] = None,
+    ):
+        """
+        Initialize MaskManager with configurable paths and device.
+
+        Args:
+            sam_checkpoint: Path to SAM weights. Defaults to ./sam_models/sam_vit_b_01ec64.pth
+            sam_type: SAM model type: "vit_b", "vit_l", "vit_h", or "sam2"
+            cutie_weights: Path to Cutie weights. Defaults to mask_propagation/Cutie/weights/cutie-base-mega.pth
+            device: Device to use ('cuda', 'cuda:0', 'cpu', etc.). Defaults to 'cuda' if available.
+        """
+        self.masks = None  # masks instances from image segmentation component (SAM)
+        self.mask = None  # mask instances related to mask temporal propagator (Cutie)
         self.prediction = None
         self.tracklet_mask_dict = None
-        # self.mask_avg_prob_dict = None
         self.mask_color_counter = 0
         self.current_object_list_cutie = []
         self.last_object_number_cutie = 0
@@ -42,31 +59,86 @@ class MaskManager(object):
         self.init_delay_counter = 0
         self.SAM_START_FRAME = 1
 
-        # For SAM
-        np.random.seed(0)
-        sam_checkpoint = "./sam_models/sam_vit_b_01ec64.pth"
-        model_type = "vit_b"
-        self.device = "cuda:0"
-        self.sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
-        self.sam.to(device=self.device)
-        self.sam_predictor = SamPredictor(self.sam)
+        # Set device
+        if device is None:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
 
+        # Set default paths
+        if sam_checkpoint is None:
+            sam_checkpoint = "./sam_models/sam_vit_b_01ec64.pth"
+
+        if cutie_weights is None:
+            cutie_weights = str(Path(__file__).parent / "Cutie" / "weights" / "cutie-base-mega.pth")
+
+        # Store for reference
+        self.sam_checkpoint = sam_checkpoint
+        self.sam_type = sam_type
+        self.cutie_weights = cutie_weights
+
+        # Initialize SAM
+        np.random.seed(0)
+        self._init_sam(sam_checkpoint, sam_type)
+
+        # Initialize Cutie
+        self._init_cutie(cutie_weights)
+
+    def _init_sam(self, sam_checkpoint: str, sam_type: str):
+        """Initialize SAM or SAM2 model."""
+        if sam_type == "sam2":
+            # SAM2 initialization
+            try:
+                from sam2.build_sam import build_sam2
+                from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+                self.sam = build_sam2(sam_checkpoint)
+                self.sam.to(device=self.device)
+                self.sam_predictor = SAM2ImagePredictor(self.sam)
+                self._is_sam2 = True
+            except ImportError:
+                raise ImportError(
+                    "SAM2 package not found. Install with: pip install sam2"
+                )
+        else:
+            # Original SAM initialization
+            from segment_anything import sam_model_registry, SamPredictor
+
+            if sam_type not in ["vit_b", "vit_l", "vit_h"]:
+                raise ValueError(
+                    f"Unknown SAM type: {sam_type}. "
+                    f"Available: vit_b, vit_l, vit_h, sam2"
+                )
+
+            self.sam = sam_model_registry[sam_type](checkpoint=sam_checkpoint)
+            self.sam.to(device=self.device)
+            self.sam_predictor = SamPredictor(self.sam)
+            self._is_sam2 = False
+
+    def _init_cutie(self, cutie_weights: str):
+        """Initialize Cutie model."""
         with torch.inference_mode():
             with torch.cuda.amp.autocast(enabled=True):
-                initialize(version_base='1.3.2', config_path=str(cutie_config_rel), job_name="eval_config")
+                # Clear any previous Hydra initialization
+                GlobalHydra.instance().clear()
+
+                initialize(
+                    version_base='1.3.2',
+                    config_path=str(cutie_config_rel),
+                    job_name="eval_config"
+                )
                 cfg = compose(config_name="eval_config")
 
-                weight_path = Path(__file__).parent / "Cutie" / "weights" / "cutie-base-mega.pth"
+                weight_path = Path(cutie_weights)
                 with open_dict(cfg):
-                    cfg['weights'] = weight_path
-                    # cfg['weights'] = './mask_propagation/Cutie/weights/cutie-base-mega.pth'
+                    cfg['weights'] = str(weight_path)
 
-                # This function from Cutie must be called as in fact, it modifies (adds extra values) to cfg 
+                # This function from Cutie must be called as it modifies (adds extra values) to cfg
                 _ = get_dataset_cfg(cfg)
 
                 # Load the network weights
-                self.cutie = CUTIE(cfg).cuda().eval()
-                model_weights = torch.load(cfg.weights)
+                self.cutie = CUTIE(cfg).to(self.device).eval()
+                model_weights = torch.load(cfg.weights, map_location=self.device)
                 self.cutie.load_weights(model_weights)
 
                 # For Cutie
