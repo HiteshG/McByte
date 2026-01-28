@@ -28,7 +28,12 @@ OVERLAP_VARIANT_2_GRID_STEP = 10
 MASK_CREATION_BBOX_OVERLAP_THRESHOLD = 0.6
 
 # Supported SAM model types
-SAM_MODEL_TYPES = ["vit_b", "vit_l", "vit_h", "sam2"]
+# For SAM1: "vit_b", "vit_l", "vit_h" (requires local checkpoint)
+# For SAM2+: Use HuggingFace model ID directly, e.g.:
+#   - "facebook/sam2-hiera-large"
+#   - "facebook/sam2.1-hiera-large"
+#   - "facebook/sam2-hiera-small"
+SAM1_MODEL_TYPES = ["vit_b", "vit_l", "vit_h"]
 
 
 class MaskManager(object):
@@ -43,8 +48,15 @@ class MaskManager(object):
         Initialize MaskManager with configurable paths and device.
 
         Args:
-            sam_checkpoint: Path to SAM weights. Defaults to ./sam_models/sam_vit_b_01ec64.pth
-            sam_type: SAM model type: "vit_b", "vit_l", "vit_h", or "sam2"
+            sam_checkpoint: Path to SAM weights. Required for SAM1 (vit_b/vit_l/vit_h).
+                           Ignored for SAM2+ (uses HuggingFace).
+                           Defaults to ./sam_models/sam_vit_b_01ec64.pth for SAM1.
+            sam_type: SAM model type. Options:
+                     - SAM1: "vit_b", "vit_l", "vit_h" (requires sam_checkpoint)
+                     - SAM2+: HuggingFace model ID, e.g.:
+                       - "facebook/sam2-hiera-large"
+                       - "facebook/sam2.1-hiera-large"
+                       - "facebook/sam2-hiera-small"
             cutie_weights: Path to Cutie weights. Defaults to mask_propagation/Cutie/weights/cutie-base-mega.pth
             device: Device to use ('cuda', 'cuda:0', 'cpu', etc.). Defaults to 'cuda' if available.
         """
@@ -85,35 +97,50 @@ class MaskManager(object):
         self._init_cutie(cutie_weights)
 
     def _init_sam(self, sam_checkpoint: str, sam_type: str):
-        """Initialize SAM or SAM2 model."""
-        if sam_type == "sam2":
-            # SAM2 initialization
+        """Initialize SAM or SAM2+ model.
+
+        For SAM1 (vit_b, vit_l, vit_h): Uses local checkpoint file.
+        For SAM2+: Uses HuggingFace model ID (e.g., "facebook/sam2.1-hiera-large").
+        """
+        # Check if sam_type is a HuggingFace model ID (contains "/")
+        is_huggingface_model = "/" in sam_type
+
+        if is_huggingface_model:
+            # SAM2+ initialization via HuggingFace
             try:
-                from sam2.build_sam import build_sam2
                 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-                self.sam = build_sam2(sam_checkpoint)
-                self.sam.to(device=self.device)
-                self.sam_predictor = SAM2ImagePredictor(self.sam)
+                # Load directly from HuggingFace with automatic config
+                self.sam_predictor = SAM2ImagePredictor.from_pretrained(sam_type)
+                self.sam_predictor.model.to(device=self.device)
+                self.sam = self.sam_predictor.model  # Keep reference for device access
                 self._is_sam2 = True
+                self._sam_model_id = sam_type
             except ImportError:
                 raise ImportError(
                     "SAM2 package not found. Install with: pip install sam2"
                 )
-        else:
-            # Original SAM initialization
-            from segment_anything import sam_model_registry, SamPredictor
-
-            if sam_type not in ["vit_b", "vit_l", "vit_h"]:
-                raise ValueError(
-                    f"Unknown SAM type: {sam_type}. "
-                    f"Available: vit_b, vit_l, vit_h, sam2"
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load SAM2 model '{sam_type}' from HuggingFace. "
+                    f"Make sure you're logged in (huggingface-cli login) and have "
+                    f"accepted the model license. Error: {e}"
                 )
+        elif sam_type in SAM1_MODEL_TYPES:
+            # Original SAM1 initialization
+            from segment_anything import sam_model_registry, SamPredictor
 
             self.sam = sam_model_registry[sam_type](checkpoint=sam_checkpoint)
             self.sam.to(device=self.device)
             self.sam_predictor = SamPredictor(self.sam)
             self._is_sam2 = False
+            self._sam_model_id = sam_type
+        else:
+            raise ValueError(
+                f"Unknown SAM type: {sam_type}. "
+                f"For SAM1, use: vit_b, vit_l, vit_h. "
+                f"For SAM2+, use HuggingFace model ID (e.g., 'facebook/sam2.1-hiera-large')."
+            )
 
     def _init_cutie(self, cutie_weights: str):
         """Initialize Cutie model."""

@@ -81,8 +81,10 @@ def run_inference(
         track_buffer: Frames to keep lost tracks before removal
 
         # Mask options
-        sam_checkpoint: Path to SAM weights. If None, uses default.
-        sam_type: SAM model type: "vit_b", "vit_l", "vit_h", "sam2"
+        sam_checkpoint: Path to SAM weights. Required for SAM1, ignored for SAM2+.
+        sam_type: SAM model type. Options:
+                 - SAM1: "vit_b", "vit_l", "vit_h" (requires sam_checkpoint)
+                 - SAM2+: HuggingFace model ID (e.g., "facebook/sam2.1-hiera-large")
         cutie_weights: Path to Cutie weights. If None, uses default.
         enable_masks: Whether to enable mask propagation
 
@@ -413,13 +415,19 @@ def validate_setup(
     if verbose:
         print("[3/4] Checking SAM...")
     try:
-        if sam_type == "sam2":
-            from sam2.build_sam import build_sam2
+        # Check if sam_type is a HuggingFace model ID (contains "/")
+        is_huggingface_model = "/" in sam_type
+
+        if is_huggingface_model:
+            # SAM2+ via HuggingFace
             from sam2.sam2_image_predictor import SAM2ImagePredictor
-            sam = build_sam2(sam_checkpoint)
-            sam.to(device)
-            predictor = SAM2ImagePredictor(sam)
+            predictor = SAM2ImagePredictor.from_pretrained(sam_type)
+            predictor.model.to(device)
+            sam = predictor.model
+            if verbose:
+                print(f"  [OK] SAM2 loaded from HuggingFace: {sam_type}")
         else:
+            # SAM1 via local checkpoint
             from segment_anything import sam_model_registry, SamPredictor
             sam = sam_model_registry[sam_type](checkpoint=sam_checkpoint)
             sam.to(device)
