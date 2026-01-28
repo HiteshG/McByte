@@ -187,13 +187,13 @@ def make_parser():
         "--sam_type",
         type=str,
         default="vit_b",
-        help="SAM model: vit_b, vit_l, vit_h (SAM1) or HuggingFace ID like facebook/sam2.1-hiera-large (SAM2+)"
+        help="SAM model: vit_b/vit_l/vit_h (SAM1), facebook/sam2.1-hiera-large (SAM2 HuggingFace), or sam2_hiera_l (SAM2 local)"
     )
     parser.add_argument(
         "--sam_checkpoint",
         type=str,
         default=None,
-        help="Path to SAM1 checkpoint (only for vit_b/vit_l/vit_h, ignored for SAM2+)"
+        help="Path to SAM checkpoint (required for SAM1 and SAM2 local configs, ignored for HuggingFace)"
     )
 
     return parser

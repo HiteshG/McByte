@@ -127,7 +127,25 @@ In case the original models links are broken and they cannot be downloaded, you 
 
 For improved mask quality, you can use SAM2.1 instead of SAM1.
 
-### Installation
+### Option A: SAM2 Real-Time Fork (Recommended)
+
+This fork is optimized for real-time performance:
+
+```bash
+# Clone the repository
+git clone https://github.com/Gy920/segment-anything-2-real-time.git
+cd segment-anything-2-real-time
+
+# Install
+pip install -e .
+python setup.py build_ext --inplace
+
+# Download checkpoints
+cd checkpoints && bash download_ckpts.sh
+cd ../..
+```
+
+### Option B: Official SAM2 from HuggingFace
 
 ```bash
 # Install SAM2 package
@@ -137,20 +155,33 @@ pip install sam2
 huggingface-cli login
 ```
 
-### Accept Model License
-
 Visit and accept the license:
 - SAM2.1: https://huggingface.co/facebook/sam2.1-hiera-large
 
 ### Usage
 
 ```bash
-# Run with SAM2.1 (auto-downloads weights + config)
+# Run with SAM2 local checkpoint (real-time fork)
+python tools/demo_track.py --path video.mp4 \
+    --sam_type sam2_hiera_l \
+    --sam_checkpoint /path/to/segment-anything-2-real-time/checkpoints/sam2_hiera_large.pt
+
+# Run with SAM2.1 via HuggingFace (auto-downloads weights + config)
 python tools/demo_track.py --path video.mp4 --sam_type facebook/sam2.1-hiera-large
 
 # Run with SAM1 (default behavior)
 python tools/demo_track.py --path video.mp4 --sam_type vit_b
 ```
+
+### SAM2 Local Config Names
+
+When using local checkpoints, use these config names with `--sam_type`:
+| Config Name | Checkpoint File |
+|-------------|-----------------|
+| `sam2_hiera_t` | `sam2_hiera_tiny.pt` |
+| `sam2_hiera_s` | `sam2_hiera_small.pt` |
+| `sam2_hiera_b+` | `sam2_hiera_base_plus.pt` |
+| `sam2_hiera_l` | `sam2_hiera_large.pt` |
 
 ### Available SAM2 Models
 

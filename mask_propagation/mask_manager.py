@@ -29,11 +29,18 @@ MASK_CREATION_BBOX_OVERLAP_THRESHOLD = 0.6
 
 # Supported SAM model types
 # For SAM1: "vit_b", "vit_l", "vit_h" (requires local checkpoint)
-# For SAM2+: Use HuggingFace model ID directly, e.g.:
+# For SAM2+ HuggingFace: Use model ID directly, e.g.:
 #   - "facebook/sam2-hiera-large"
 #   - "facebook/sam2.1-hiera-large"
 #   - "facebook/sam2-hiera-small"
+# For SAM2+ local checkpoint: Use config name, e.g.:
+#   - "sam2_hiera_l", "sam2_hiera_b+", "sam2_hiera_s", "sam2_hiera_t"
+#   - "sam2.1_hiera_l", "sam2.1_hiera_b+", "sam2.1_hiera_s", "sam2.1_hiera_t"
 SAM1_MODEL_TYPES = ["vit_b", "vit_l", "vit_h"]
+SAM2_LOCAL_CONFIGS = [
+    "sam2_hiera_l", "sam2_hiera_b+", "sam2_hiera_s", "sam2_hiera_t",
+    "sam2.1_hiera_l", "sam2.1_hiera_b+", "sam2.1_hiera_s", "sam2.1_hiera_t",
+]
 
 
 class MaskManager(object):
@@ -48,15 +55,18 @@ class MaskManager(object):
         Initialize MaskManager with configurable paths and device.
 
         Args:
-            sam_checkpoint: Path to SAM weights. Required for SAM1 (vit_b/vit_l/vit_h).
-                           Ignored for SAM2+ (uses HuggingFace).
+            sam_checkpoint: Path to SAM weights.
+                           - Required for SAM1 (vit_b/vit_l/vit_h)
+                           - Required for SAM2+ local configs (sam2_hiera_l, etc.)
+                           - Ignored for SAM2+ HuggingFace (auto-downloads)
                            Defaults to ./sam_models/sam_vit_b_01ec64.pth for SAM1.
             sam_type: SAM model type. Options:
                      - SAM1: "vit_b", "vit_l", "vit_h" (requires sam_checkpoint)
-                     - SAM2+: HuggingFace model ID, e.g.:
+                     - SAM2+ HuggingFace: model ID, e.g.:
                        - "facebook/sam2-hiera-large"
                        - "facebook/sam2.1-hiera-large"
-                       - "facebook/sam2-hiera-small"
+                     - SAM2+ local: config name (requires sam_checkpoint), e.g.:
+                       - "sam2_hiera_l", "sam2_hiera_t", "sam2.1_hiera_l"
             cutie_weights: Path to Cutie weights. Defaults to mask_propagation/Cutie/weights/cutie-base-mega.pth
             device: Device to use ('cuda', 'cuda:0', 'cpu', etc.). Defaults to 'cuda' if available.
         """
@@ -100,10 +110,12 @@ class MaskManager(object):
         """Initialize SAM or SAM2+ model.
 
         For SAM1 (vit_b, vit_l, vit_h): Uses local checkpoint file.
-        For SAM2+: Uses HuggingFace model ID (e.g., "facebook/sam2.1-hiera-large").
+        For SAM2+ HuggingFace: Uses model ID (e.g., "facebook/sam2.1-hiera-large").
+        For SAM2+ local: Uses config name (e.g., "sam2_hiera_l") with local checkpoint.
         """
         # Check if sam_type is a HuggingFace model ID (contains "/")
         is_huggingface_model = "/" in sam_type
+        is_sam2_local = sam_type in SAM2_LOCAL_CONFIGS
 
         if is_huggingface_model:
             # SAM2+ initialization via HuggingFace
@@ -126,6 +138,33 @@ class MaskManager(object):
                     f"Make sure you're logged in (huggingface-cli login) and have "
                     f"accepted the model license. Error: {e}"
                 )
+        elif is_sam2_local:
+            # SAM2+ initialization via local checkpoint (e.g., real-time fork)
+            try:
+                from sam2.build_sam import build_sam2
+                from sam2.sam2_image_predictor import SAM2ImagePredictor
+
+                if sam_checkpoint is None:
+                    raise ValueError(
+                        f"SAM2 local config '{sam_type}' requires --sam_checkpoint path"
+                    )
+
+                # Build SAM2 model from config and checkpoint
+                sam2_model = build_sam2(sam_type, sam_checkpoint, device=self.device)
+                self.sam_predictor = SAM2ImagePredictor(sam2_model)
+                self.sam = sam2_model  # Keep reference for device access
+                self._is_sam2 = True
+                self._sam_model_id = sam_type
+            except ImportError:
+                raise ImportError(
+                    "SAM2 package not found. Install from: "
+                    "https://github.com/Gy920/segment-anything-2-real-time"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load SAM2 model with config '{sam_type}' "
+                    f"and checkpoint '{sam_checkpoint}'. Error: {e}"
+                )
         elif sam_type in SAM1_MODEL_TYPES:
             # Original SAM1 initialization
             from segment_anything import sam_model_registry, SamPredictor
@@ -139,7 +178,8 @@ class MaskManager(object):
             raise ValueError(
                 f"Unknown SAM type: {sam_type}. "
                 f"For SAM1, use: vit_b, vit_l, vit_h. "
-                f"For SAM2+, use HuggingFace model ID (e.g., 'facebook/sam2.1-hiera-large')."
+                f"For SAM2+ HuggingFace, use model ID (e.g., 'facebook/sam2.1-hiera-large'). "
+                f"For SAM2+ local, use config name (e.g., 'sam2_hiera_l') with --sam_checkpoint."
             )
 
     def _sam_predict_boxes(self, image: np.ndarray, boxes_xyxy: list) -> torch.Tensor:
