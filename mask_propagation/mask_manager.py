@@ -142,6 +142,48 @@ class MaskManager(object):
                 f"For SAM2+, use HuggingFace model ID (e.g., 'facebook/sam2.1-hiera-large')."
             )
 
+    def _sam_predict_boxes(self, image: np.ndarray, boxes_xyxy: list) -> torch.Tensor:
+        """
+        Unified SAM prediction for both SAM1 and SAM2+.
+
+        Args:
+            image: RGB image as numpy array (H, W, 3)
+            boxes_xyxy: List of [x1, y1, x2, y2] bounding boxes
+
+        Returns:
+            masks: Binary masks as tensor (N, 1, H, W)
+        """
+        self.sam_predictor.set_image(image)
+
+        if self._is_sam2:
+            # SAM2/SAM2.1 API - loop over boxes (no batch support)
+            masks_list = []
+            for box in boxes_xyxy:
+                box_np = np.array(box, dtype=np.float32)
+                masks, _, _ = self.sam_predictor.predict(
+                    box=box_np,
+                    multimask_output=False
+                )
+                # masks shape: (1, H, W) -> add to list
+                masks_list.append(torch.from_numpy(masks).to(self.device))
+
+            if masks_list:
+                return torch.stack(masks_list, dim=0)  # (N, 1, H, W)
+            return torch.empty(0, 1, image.shape[0], image.shape[1], device=self.device)
+        else:
+            # SAM1 API - batch processing
+            image_boxes = torch.tensor(boxes_xyxy, device=self.device)
+            transformed_boxes = self.sam_predictor.transform.apply_boxes_torch(
+                image_boxes, image.shape[:2]
+            )
+            masks, _, _ = self.sam_predictor.predict_torch(
+                point_coords=None,
+                point_labels=None,
+                boxes=transformed_boxes,
+                multimask_output=False
+            )
+            return masks  # (N, 1, H, W)
+
     def _init_cutie(self, cutie_weights: str):
         """Initialize Cutie model."""
         with torch.inference_mode():
@@ -215,11 +257,10 @@ class MaskManager(object):
     
 
     def initialize_first_masks(self, frame_torch, frame_torch_prev, img_info_prev, online_tlwhs, online_ids):
-        self.sam_predictor.set_image(img_info_prev['raw_img']) 
         image_boxes_list = []
         new_tracks_id = []
 
-        # Based on ByteTrack mechanisms, the tracklets created at the first frame will already be considered fully activated, thus as the tracked tracklets (stracks). 
+        # Based on ByteTrack mechanisms, the tracklets created at the first frame will already be considered fully activated, thus as the tracked tracklets (stracks).
         # Therefore using the online_tlwhs coming from the tracker output
         for i, ot in enumerate(online_tlwhs):
 
@@ -235,20 +276,13 @@ class MaskManager(object):
             image_boxes_list.append([ot[0], ot[1], ot[0] + ot[2], ot[1] + ot[3]])
             new_tracks_id.append(online_ids[i])
 
-        if image_boxes_list == 0:
+        if len(image_boxes_list) == 0:
             # Delay the whole process
             self.init_delay_counter += 1
             return None
         else:
-            image_boxes = torch.tensor(image_boxes_list, device=self.sam.device)
-            transformed_boxes = self.sam_predictor.transform.apply_boxes_torch(image_boxes, img_info_prev['raw_img'].shape[:2])
-            
-            masks, _, _ = self.sam_predictor.predict_torch(
-                point_coords=None,
-                point_labels=None,
-                boxes=transformed_boxes,
-                multimask_output=False
-            )
+            # Use unified SAM prediction method
+            masks = self._sam_predict_boxes(img_info_prev['raw_img'], image_boxes_list)
             # Convert masks
             mask = np.zeros(masks[0].shape)
 
@@ -282,8 +316,7 @@ class MaskManager(object):
 
 
     def add_new_masks(self, frame_torch_prev, img_info_prev, online_tlwhs, online_ids, new_tracks):
-        if len(new_tracks) > 0 or len(self.awaiting_mask_tracklet_ids)> 0:
-            self.sam_predictor.set_image(img_info_prev['raw_img'])
+        if len(new_tracks) > 0 or len(self.awaiting_mask_tracklet_ids) > 0:
             image_boxes_list = []
             new_tracks_id = []
 
@@ -328,15 +361,8 @@ class MaskManager(object):
             ### </> ###
 
             if len(image_boxes_list) > 0:
-                image_boxes = torch.tensor(image_boxes_list, device=self.sam.device)
-                transformed_boxes = self.sam_predictor.transform.apply_boxes_torch(image_boxes, img_info_prev['raw_img'].shape[:2])
-
-                masks, _, _ = self.sam_predictor.predict_torch(
-                    point_coords=None,
-                    point_labels=None,
-                    boxes=transformed_boxes,
-                    multimask_output=False
-                )
+                # Use unified SAM prediction method
+                masks = self._sam_predict_boxes(img_info_prev['raw_img'], image_boxes_list)
 
                 # Convert masks!
                 mask_extra = np.zeros(masks[0].shape)

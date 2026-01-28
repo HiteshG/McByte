@@ -182,6 +182,20 @@ def make_parser():
         help="Disable class filtering (track all detected classes)"
     )
 
+    # SAM model arguments
+    parser.add_argument(
+        "--sam_type",
+        type=str,
+        default="vit_b",
+        help="SAM model: vit_b, vit_l, vit_h (SAM1) or HuggingFace ID like facebook/sam2.1-hiera-large (SAM2+)"
+    )
+    parser.add_argument(
+        "--sam_checkpoint",
+        type=str,
+        default=None,
+        help="Path to SAM1 checkpoint (only for vit_b/vit_l/vit_h, ignored for SAM2+)"
+    )
+
     return parser
 
 
@@ -338,7 +352,10 @@ def image_demo(det_source, vis_folder, current_time, args):
             mask_avg_prob_dict = None
             prediction_colors_preserved = None
 
-            mask_menager = MaskManager()
+            mask_menager = MaskManager(
+                sam_checkpoint=args.sam_checkpoint,
+                sam_type=args.sam_type,
+            )
 
             for frame_id, img_path in enumerate(files, 1):
                 print("Frame {}".format(str(frame_id)))
@@ -474,7 +491,10 @@ def video_demo(det_source, vis_folder, current_time, args):
             mask_avg_prob_dict = None
             prediction_colors_preserved = None
 
-            mask_menager = MaskManager()
+            mask_menager = MaskManager(
+                sam_checkpoint=args.sam_checkpoint,
+                sam_type=args.sam_type,
+            )
 
             frame_id = 1
             while True:

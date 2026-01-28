@@ -121,3 +121,42 @@ In case the original models links are broken and they cannot be downloaded, you 
 <br/>
 
 (Credit belongs to the original authors, see the references in the sections above.)
+
+
+## SAM2/SAM2.1 (Optional - Better Segmentation)
+
+For improved mask quality, you can use SAM2.1 instead of SAM1.
+
+### Installation
+
+```bash
+# Install SAM2 package
+pip install sam2
+
+# Login to HuggingFace (required for model download)
+huggingface-cli login
+```
+
+### Accept Model License
+
+Visit and accept the license:
+- SAM2.1: https://huggingface.co/facebook/sam2.1-hiera-large
+
+### Usage
+
+```bash
+# Run with SAM2.1 (auto-downloads weights + config)
+python tools/demo_track.py --path video.mp4 --sam_type facebook/sam2.1-hiera-large
+
+# Run with SAM1 (default behavior)
+python tools/demo_track.py --path video.mp4 --sam_type vit_b
+```
+
+### Available SAM2 Models
+
+| Model | Speed | Quality |
+|-------|-------|---------|
+| `facebook/sam2-hiera-tiny` | Fastest | Lower |
+| `facebook/sam2-hiera-small` | Fast | Good |
+| `facebook/sam2-hiera-large` | Medium | High |
+| `facebook/sam2.1-hiera-large` | Medium | **Best** |
